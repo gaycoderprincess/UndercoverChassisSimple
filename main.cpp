@@ -42,7 +42,7 @@ struct tCarSteeringSetup {
 	float fMaxSteer = 0.3;
 	float fMinSpeed = 0;
 	float fMaxSpeed = 300;
-	float fKeyboardSteerSpeed = 0.25;
+	float fKeyboardSteerSpeed = 1.0;
 };
 std::vector<tCarSteeringSetup> aCarSteerings;
 bool bOverrideCarSteering = false;
@@ -98,28 +98,6 @@ void IncreaseTowards(float& value, float target, float speed) {
 	}
 }
 
-void __thiscall SimpleSteeringHooked(ChassisSimple* pThis, Chassis::State *state, UMath::Vector3 *right, UMath::Vector3 *left) {
-	if (pThis->mVehicle->GetDriverClass() != DRIVER_HUMAN) return ChassisSimple::DoSteering(pThis, state, right, left);
-
-	static auto lastTime = Sim::GetTime();
-	auto delta = (double)(Sim::GetTime() - lastTime) / 1000.0;
-	if (delta < 0.0) delta = 0.0;
-	if (delta > 1.0 / 15.0) delta = 1.0 / 15.0;
-	lastTime = Sim::GetTime();
-
-	auto newState = *state;
-	newState.steer_input *= GetCarSteeringMult(pThis->mVehicleInfo.GetLayout(), pThis->mVehicle);
-	IncreaseTowards(fSmoothedSteerState, newState.steer_input, GetCarSteeringData(pThis->mVehicle->GetVehicleName())->fKeyboardSteerSpeed * delta);
-	newState.steer_input = fSmoothedSteerState;
-	ChassisSimple::DoSteering(pThis, &newState, right, left);
-}
-
-void __thiscall SimpleDriveForceHooked(ChassisSimple* pThis, Chassis::State *state) {
-	auto newState = *state;
-	newState.nos_boost = 1.0;
-	ChassisSimple::DoDriveForces(pThis, &newState);
-}
-
 void __thiscall SimpleGetStateHooked(ChassisSimple* pThis, float dT, Chassis::State *state) {
 	ChassisSimple::ComputeState(pThis, dT, state);
 	state->nos_boost = 1.0; // remove nos grip bonus
@@ -127,16 +105,45 @@ void __thiscall SimpleGetStateHooked(ChassisSimple* pThis, float dT, Chassis::St
 	if (pThis->mVehicle->GetDriverClass() != DRIVER_HUMAN) return;
 	state->over_steer_input = 0.0;
 
-	static auto lastTime = Sim::GetTime();
-	auto delta = (double)(Sim::GetTime() - lastTime) / 1000.0;
-	if (delta < 0.0) delta = 0.0;
-	if (delta > 1.0 / 15.0) delta = 1.0 / 15.0;
-	lastTime = Sim::GetTime();
+	state->steer_input *= GetCarSteeringMult(pThis->mVehicleInfo.GetLayout(), pThis->mVehicle);
+	IncreaseTowards(fSmoothedSteerState, state->steer_input, GetCarSteeringData(pThis->mVehicle->GetVehicleName())->fKeyboardSteerSpeed * dT);
+	state->steer_input = fSmoothedSteerState;
+}
 
-	auto newState = *state;
-	newState.steer_input *= GetCarSteeringMult(pThis->mVehicleInfo.GetLayout(), pThis->mVehicle);
-	IncreaseTowards(fSmoothedSteerState, newState.steer_input, GetCarSteeringData(pThis->mVehicle->GetVehicleName())->fKeyboardSteerSpeed * delta);
-	newState.steer_input = fSmoothedSteerState;
+void LoadSteeringCurves() {
+	aCarSteerings.clear();
+
+	if (std::filesystem::exists("SteeringCurves")) {
+		for (const auto& entry : std::filesystem::directory_iterator("SteeringCurves")) {
+			if (entry.is_directory()) continue;
+
+			auto path = entry.path();
+			if (path.extension() != ".toml") continue;
+
+			auto config = toml::parse_file(path.string());
+
+			auto carName = path.filename().string();
+			for (int i = 0; i < 5; i++) { carName.pop_back(); }
+
+			tCarSteeringSetup tmp;
+			auto setup = &tmp;
+			if (carName == "default") {
+				setup = &gDefaultCarSteering;
+			}
+
+			setup->mdl = carName;
+			setup->fMinSteer = config["min_steer_angle"].value_or(setup->fMinSteer);
+			setup->fMaxSteer = config["max_steer_angle"].value_or(setup->fMaxSteer);
+			setup->fMinSpeed = config["min_steer_angle_speed"].value_or(setup->fMinSpeed);
+			setup->fMaxSpeed = config["max_steer_angle_speed"].value_or(setup->fMaxSpeed);
+			setup->fKeyboardSteerSpeed = config["steering_speed"].value_or(setup->fKeyboardSteerSpeed);
+			if (carName != "default") {
+				aCarSteerings.push_back(*setup);
+			}
+
+			WriteLog(std::format("Registered steering curves for {} ({})", carName, path.string()));
+		}
+	}
 }
 
 void DebugMenu() {
@@ -151,7 +158,10 @@ void DebugMenu() {
 	QuickValueEditor("fMaxSpeed", gDefaultCarSteering.fMaxSpeed);
 	QuickValueEditor("fKeyboardSteerSpeed", gDefaultCarSteering.fKeyboardSteerSpeed);
 
-	DrawMenuOption("Debug State", "", false);
+	if (DrawMenuOption("Reload Steering Curves")) {
+		LoadSteeringCurves();
+	}
+
 	DrawMenuOption(std::format("steer input {:.2f}", fSmoothedSteerState), "", false);
 	DrawMenuOption(std::format("steer output {:.2f}", curve), "", false);
 
@@ -166,54 +176,24 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD fdwReason, LPVOID) {
 				return TRUE;
 			}
 
-			if (std::filesystem::exists("SteeringCurves")) {
-				for (const auto& entry : std::filesystem::directory_iterator("SteeringCurves")) {
-					if (entry.is_directory()) continue;
-
-					auto path = entry.path();
-					if (path.extension() != ".toml") continue;
-
-					auto config = toml::parse_file(path.string());
-
-					auto carName = path.filename().string();
-					for (int i = 0; i < 5; i++) { carName.pop_back(); }
-
-					tCarSteeringSetup tmp;
-					auto setup = &tmp;
-					if (carName == "default") {
-						setup = &gDefaultCarSteering;
-					}
-
-					setup->mdl = carName;
-					setup->fMinSteer = config["min_steer_angle"].value_or(setup->fMinSteer);
-					setup->fMaxSteer = config["max_steer_angle"].value_or(setup->fMaxSteer);
-					setup->fMinSpeed = config["min_steer_angle_speed"].value_or(setup->fMinSpeed);
-					setup->fMaxSpeed = config["max_steer_angle_speed"].value_or(setup->fMaxSpeed);
-					setup->fKeyboardSteerSpeed = config["steering_speed"].value_or(setup->fKeyboardSteerSpeed);
-					if (carName != "default") {
-						aCarSteerings.push_back(*setup);
-					}
-
-					WriteLog(std::format("Registered steering curves for {} ({})", carName, path.string()));
-				}
-			}
+			LoadSteeringCurves();
 
 			ChloeMenuLib::RegisterMenu("Debug Menu", &DebugMenu);
 
-			NyaHookLib::PatchRelative(NyaHookLib::CALL, 0x713979, &SimpleSteeringHooked);
-			NyaHookLib::PatchRelative(NyaHookLib::CALL, 0x72B594, &SimpleDriveForceHooked);
-			//NyaHookLib::PatchRelative(NyaHookLib::CALL, 0x72B17F, &SimpleGetStateHooked);
+			NyaHookLib::PatchRelative(NyaHookLib::CALL, 0x72B17F, &SimpleGetStateHooked);
 			NyaHookLib::PatchRelative(NyaHookLib::JMP, 0x72B65D, 0x72B827); // disable "sleep" that isn't actual sleep
 			NyaHookLib::Patch<uint8_t>(0x7136DF, 0xEB); // always allow tire slip
 
-			NyaHooks::WorldServiceHook::Init();
+			// test loop - cap driver skills at 25%
+			/*NyaHooks::WorldServiceHook::Init();
 			NyaHooks::WorldServiceHook::aPreFunctions.push_back([]() {
 				for (auto& skill : GMW2Game::mObj->mRewardModifiers) {
 					if (skill > 0.25) {
 						skill = 0.25;
 					}
 				}
-			});
+			});*/
+
 			NyaHooks::LateInitHook::Init();
 			NyaHooks::LateInitHook::aFunctions.push_back([](){ *(uintptr_t*)0xDEA82C = 0x73F8F0; }); // use chassissimple
 

@@ -104,9 +104,16 @@ void __thiscall SimpleGetStateHooked(ChassisSimple* pThis, float dT, Chassis::St
 
 	if (pThis->mVehicle->GetDriverClass() != DRIVER_HUMAN) return;
 	state->over_steer_input = 0.0;
+	state->ebrake_input = 0.0; // todo hack
 
 	state->steer_input *= GetCarSteeringMult(pThis->mVehicleInfo.GetLayout(), pThis->mVehicle);
-	IncreaseTowards(fSmoothedSteerState, state->steer_input, GetCarSteeringData(pThis->mVehicle->GetVehicleName())->fKeyboardSteerSpeed * dT);
+
+	float smoothSteerSpeed =  GetCarSteeringData(pThis->mVehicle->GetVehicleName())->fKeyboardSteerSpeed * dT;
+	// countersteer bonus
+	if (fSmoothedSteerState > 0.01 && state->steer_input < -0.01) smoothSteerSpeed *= 2;
+	if (fSmoothedSteerState < -0.01 && state->steer_input > 0.01) smoothSteerSpeed *= 2;
+
+	IncreaseTowards(fSmoothedSteerState, state->steer_input, smoothSteerSpeed);
 	state->steer_input = fSmoothedSteerState;
 }
 
@@ -163,7 +170,7 @@ void DebugMenu() {
 	}
 
 	DrawMenuOption(std::format("steer input {:.2f}", fSmoothedSteerState), "", false);
-	DrawMenuOption(std::format("steer output {:.2f}", curve), "", false);
+	DrawMenuOption(std::format("steer cap {:.2f}", curve), "", false);
 
 	ChloeMenuLib::EndMenu();
 }
@@ -183,6 +190,7 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD fdwReason, LPVOID) {
 			NyaHookLib::PatchRelative(NyaHookLib::CALL, 0x72B17F, &SimpleGetStateHooked);
 			NyaHookLib::PatchRelative(NyaHookLib::JMP, 0x72B65D, 0x72B827); // disable "sleep" that isn't actual sleep
 			NyaHookLib::Patch<uint8_t>(0x7136DF, 0xEB); // always allow tire slip
+			NyaHookLib::PatchRelative(NyaHookLib::JMP, 0x6FB3CD, 0x6FB6DC); // disable jump stabilizer
 
 			// test loop - cap driver skills at 25%
 			/*NyaHooks::WorldServiceHook::Init();

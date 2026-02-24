@@ -1,5 +1,0 @@
-min_steer_angle = 0.1		# Minimum steer angle (0.0 - 1.0)
-max_steer_angle = 0.2		# Maximum steer angle (0.0 - 1.0)
-min_steer_angle_speed = 0	# Start of the steering curve, speed to use the minimum steer angle at (KM/H)
-max_steer_angle_speed = 250	# End of the steering curve, speed to use the maximum steer angle at (KM/H)
-steering_speed = 0.75		# Smooth steering speed, akin to Tank Slapper (higher value = faster steering)

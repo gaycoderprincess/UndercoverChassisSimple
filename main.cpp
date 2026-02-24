@@ -38,11 +38,10 @@ void QuickValueEditor(const char* name, float& value) {
 
 struct tCarSteeringSetup {
 	std::string mdl;
-	float fMinSteer = 0.05;
-	float fMaxSteer = 0.3;
-	float fMinSpeed = 0;
-	float fMaxSpeed = 300;
+	float fSteerAngle[8] = {0, 50, 100, 150, 200, 250, 300, 350};
+	float fSpeedCurve[8] = {1, 0.6, 0.3, 0.2, 0.15, 0.1, 0.08, 0.08};
 	float fKeyboardSteerSpeed = 1.0;
+	float fCounterSteerBonus = 4.0;
 };
 std::vector<tCarSteeringSetup> aCarSteerings;
 bool bOverrideCarSteering = false;
@@ -72,16 +71,18 @@ float GetCarSteeringMult(Attrib::Gen::car_tuning::_LayoutStruct* data, IVehicle*
 
 	auto newData = GetCarSteeringData(veh->GetVehicleName());
 
-	spd -= newData->fMinSpeed;
-	if (spd < 0) spd = 0;
-	spd /= (newData->fMaxSpeed - newData->fMinSpeed);
+	curve = newData->fSteerAngle[0];
+	for (int i = 0; i < 8; i++) {
+		if (spd < newData->fSpeedCurve[i]) break;
 
-	auto f = std::lerp(newData->fMinSteer, newData->fMaxSteer, 1.0 - spd);
-	if (f < newData->fMinSteer) return curve = newData->fMinSteer;
-	if (f > newData->fMaxSteer) return curve = newData->fMaxSteer;
-	return curve = f;
+		if (i >= 7) return curve = newData->fSteerAngle[i];
 
-	//return curve = Curve::GetValue(&data->STEERING_RANGE, spd);
+		float delta = spd;
+		delta -= newData->fSpeedCurve[i];
+		delta /= (newData->fSpeedCurve[i+1] - newData->fSpeedCurve[i]);
+		curve = std::lerp(newData->fSteerAngle[i], newData->fSteerAngle[i+1], delta);
+	}
+	return curve;
 }
 
 float fSmoothedSteerState = 0;
@@ -98,6 +99,11 @@ void IncreaseTowards(float& value, float target, float speed) {
 	}
 }
 
+double easeOutQuart(double t) {
+	t = (--t) * t;
+	return 1 - t * t;
+}
+
 void __thiscall SimpleGetStateHooked(ChassisSimple* pThis, float dT, Chassis::State *state) {
 	ChassisSimple::ComputeState(pThis, dT, state);
 	state->nos_boost = 1.0; // remove nos grip bonus
@@ -106,15 +112,18 @@ void __thiscall SimpleGetStateHooked(ChassisSimple* pThis, float dT, Chassis::St
 	state->over_steer_input = 0.0;
 	state->ebrake_input = 0.0; // todo hack
 
-	state->steer_input *= GetCarSteeringMult(pThis->mVehicleInfo.GetLayout(), pThis->mVehicle);
+	auto newData = GetCarSteeringData(pThis->mVehicle->GetVehicleName());
+	float smoothSteerSpeed = newData->fKeyboardSteerSpeed * dT;
 
-	float smoothSteerSpeed =  GetCarSteeringData(pThis->mVehicle->GetVehicleName())->fKeyboardSteerSpeed * dT;
-	// countersteer bonus
-	if (fSmoothedSteerState > 0.01 && state->steer_input < -0.01) smoothSteerSpeed *= 2;
-	if (fSmoothedSteerState < -0.01 && state->steer_input > 0.01) smoothSteerSpeed *= 2;
+	if (fSmoothedSteerState > 0 && state->steer_input < fSmoothedSteerState) smoothSteerSpeed *= newData->fCounterSteerBonus;
+	if (fSmoothedSteerState < 0 && state->steer_input > fSmoothedSteerState) smoothSteerSpeed *= newData->fCounterSteerBonus;
+	//if (fSmoothedSteerState > 0.01 && state->steer_input < -0.01) smoothSteerSpeed *= 2;
+	//if (fSmoothedSteerState < -0.01 && state->steer_input > 0.01) smoothSteerSpeed *= 2;
 
 	IncreaseTowards(fSmoothedSteerState, state->steer_input, smoothSteerSpeed);
-	state->steer_input = fSmoothedSteerState;
+	float easedSteer = easeOutQuart(std::abs(fSmoothedSteerState));
+	if (fSmoothedSteerState < 0) easedSteer *= -1;
+	state->steer_input = easedSteer * GetCarSteeringMult(pThis->mVehicleInfo.GetLayout(), pThis->mVehicle);
 }
 
 void LoadSteeringCurves() {
@@ -139,11 +148,12 @@ void LoadSteeringCurves() {
 			}
 
 			setup->mdl = carName;
-			setup->fMinSteer = config["min_steer_angle"].value_or(setup->fMinSteer);
-			setup->fMaxSteer = config["max_steer_angle"].value_or(setup->fMaxSteer);
-			setup->fMinSpeed = config["min_steer_angle_speed"].value_or(setup->fMinSpeed);
-			setup->fMaxSpeed = config["max_steer_angle_speed"].value_or(setup->fMaxSpeed);
+			for (int i = 0; i < 8; i++) {
+				setup->fSteerAngle[i] = config["steer_angle"][i].value_or(setup->fSteerAngle[i]);
+				setup->fSpeedCurve[i] = config["speed_curve"][i].value_or(setup->fSpeedCurve[i]);
+			}
 			setup->fKeyboardSteerSpeed = config["steering_speed"].value_or(setup->fKeyboardSteerSpeed);
+			setup->fCounterSteerBonus = config["countersteering_speed"].value_or(setup->fCounterSteerBonus);
 			if (carName != "default") {
 				aCarSteerings.push_back(*setup);
 			}
@@ -159,11 +169,13 @@ void DebugMenu() {
 	if (DrawMenuOption(std::format("Use Overrides - {}", bOverrideCarSteering))) {
 		bOverrideCarSteering = !bOverrideCarSteering;
 	}
-	QuickValueEditor("fMinSteer", gDefaultCarSteering.fMinSteer);
-	QuickValueEditor("fMaxSteer", gDefaultCarSteering.fMaxSteer);
-	QuickValueEditor("fMinSpeed", gDefaultCarSteering.fMinSpeed);
-	QuickValueEditor("fMaxSpeed", gDefaultCarSteering.fMaxSpeed);
+
+	for (int i = 0; i < 8; i++) {
+		QuickValueEditor(std::format("fSteer[{}]", i).c_str(), gDefaultCarSteering.fSteerAngle[i]);
+		QuickValueEditor(std::format("fSpeed[{}]", i).c_str(), gDefaultCarSteering.fSpeedCurve[i]);
+	}
 	QuickValueEditor("fKeyboardSteerSpeed", gDefaultCarSteering.fKeyboardSteerSpeed);
+	QuickValueEditor("fCounterSteerBonus", gDefaultCarSteering.fCounterSteerBonus);
 
 	if (DrawMenuOption("Reload Steering Curves")) {
 		LoadSteeringCurves();

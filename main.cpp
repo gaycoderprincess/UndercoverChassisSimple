@@ -4,6 +4,7 @@
 #include <toml++/toml.hpp>
 
 #include "nya_commonhooklib.h"
+#include "nya_commonmath.h"
 #include "nfsuc.h"
 
 #include "include/chloemenulib.h"
